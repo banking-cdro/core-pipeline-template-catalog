@@ -1,0 +1,67 @@
+library 'cb-sandbox@master'
+def testPodYaml = libraryResource 'podtemplates/python/python-test-pod.yml'
+pipeline {
+  agent none
+  options { 
+    buildDiscarder(logRotator(numToKeepStr: '2'))
+    skipDefaultCheckout true
+    preserveStashes(buildCount: 2)
+  }
+  environment {
+    repoOwner = "${repoOwner}"
+    credId = "${githubCredentialId}"
+  }
+  stages('Python Test and Build')
+  {
+    stage('Python Tests') {
+      agent {
+        kubernetes {
+          label 'python'
+          yaml testPodYaml
+       }
+      }
+      steps {
+            checkout scm           
+            container('python3') {
+              sh '''
+                 pipenv install --system
+                 '''
+            }
+      } 
+    }
+    stage('Build and Push Image') {
+      steps { 
+        kanikoBuildPushGeneric("microblog-backend", "latest", "${gcpProject}/${repoOwner}")
+        {
+          checkout scm
+        }
+      }
+      post {
+        success {
+          echo "${JOB_NAME} pipeline job is awaiting approval at: ${RUN_DISPLAY_URL}"
+        }
+      }
+    }
+    stage("Trigger CD release") {
+        agent any
+        steps {
+            script {
+                node() {
+                    checkout scm
+                    env.VERSION = readFile 'version.txt'
+                    env.VERSION = env.VERSION.trim()
+                    imageTag = env.VERSION
+                    echo "Branch name: ${env.BRANCH_NAME}"
+                    if(env.BRANCH_NAME == 'development'){
+                      cloudBeesFlowTriggerRelease configuration: 'SDA-RO', parameters: '{"release":{"releaseName":"The Release","stages":[],"pipelineName":"The Release","parameters":[]}}', projectName: 'Blog', releaseName: 'The Release', startingStage: 'Release Readiness'                    }
+                    if(env.BRANCH_NAME.matches("[A-Z]+-[0-9]+")){ // Run CD pipelines on feature branch creation, assuming branch name = Jira ticket
+                      cloudBeesFlowRunPipeline parameters: '{"pipeline":{"pipelineName":"Backend", "parameters":[]}}', projectName: 'Team B', pipelineName: 'Backend', configuration: 'SDA-RO'
+                    }
+
+                }
+            }
+        }
+    }
+  }
+}
+
