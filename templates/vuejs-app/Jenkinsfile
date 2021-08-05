@@ -1,0 +1,84 @@
+library 'cb-sandbox@master'
+def testPodYaml = libraryResource 'podtemplates/vuejs/vuejs-test-pod.yml'
+pipeline {
+  agent none
+  options { 
+    buildDiscarder(logRotator(numToKeepStr: '10'))
+    skipDefaultCheckout true
+    preserveStashes(buildCount: 10)
+  }
+  environment {
+    repoOwner = "${repoOwner}"
+    credId = "${githubCredentialId}"
+    sonarOrg = "cb-banking-sandbox"
+    sonarProject = "microblog-js"
+  }
+  stages('VueJS Test and Build')
+  {
+    stage('Kick off Test and Scan') {
+      agent {
+        kubernetes {
+          label 'nodejs'
+          yaml testPodYaml
+       }
+      }
+      stages {
+        stage('VueJS Test'){
+           steps {
+                checkout scm           
+                container('nodejs') {
+                  echo "PR? ${env.BRANCH_NAME}"
+                   sh '''
+                     yarn install
+                     yarn test:unit --ci --reporters=default --reporters=jest-junit
+                     ls output/coverage/junit/
+                   '''     
+                  junit 'output/coverage/junit/junit.xml'
+                }
+          }
+        }
+        stage('Sonar Scan') {
+          steps {
+              container('nodejs') {
+                  script{
+                    scannerHome = tool 'SonarScanner';
+                  }
+                    withSonarQubeEnv('fid-sonar') {
+                      // This expands the evironment variables SONAR_CONFIG_NAME, SONAR_HOST_URL, SONAR_AUTH_TOKEN that can be used by any script.
+                      sh "${scannerHome}/bin/sonar-scanner -Dsonar.projectKey=$sonarProject -Dsonar.host.url=https://sonar.banking-sda.cb-demos.io -Dsonar.login=${env.SONAR_AUTH_TOKEN}"
+                    }
+                }    
+              }
+        }
+      } 
+    }
+    stage('Build and Push Image') {
+      steps { 
+        kanikoBuildPushGeneric("microblog-frontend", "latest", "${gcpProject}/${repoOwner}")
+        {
+          checkout scm
+        }
+      }
+    }
+    stage("Trigger CD release") {
+        agent any
+        steps {
+            script {
+                node() {
+                    checkout scm
+                    env.VERSION = readFile 'version.txt'
+                    env.VERSION = env.VERSION.trim()
+                    imageTag = env.VERSION
+                    if(env.BRANCH_NAME == 'development'){
+                      cloudBeesFlowTriggerRelease configuration: 'SDA-RO', parameters: '{"release":{"releaseName":"The Release","stages":[],"pipelineName":"The Release","parameters":[]}}', projectName: 'Blog', releaseName: 'The Release', startingStage: 'Release Readiness'                   
+                    }
+                    if(env.BRANCH_NAME.matches("[A-Z]+-[0-9]+")){ // Run CD pipelines on PR
+                      cloudBeesFlowRunPipeline parameters: '{"pipeline":{"pipelineName":"Frontend", "parameters":[]}}', projectName: 'Team B', pipelineName: 'Frontend', configuration: 'SDA-RO'
+                    }
+
+                }
+            }
+        }
+    }
+  }
+}
