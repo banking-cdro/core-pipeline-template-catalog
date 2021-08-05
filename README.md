@@ -1,1 +1,2 @@
-# core-pipeline-template-catalog
+# pipeline-template-catalog
+Pipeline template catalog
