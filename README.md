@@ -1,0 +1,1 @@
+# core-pipeline-template-catalog
